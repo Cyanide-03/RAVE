@@ -19,7 +19,7 @@ import utils.image_process_utils as ipu
 
 logging.set_verbosity_error()
 
-def set_seed_lib(seed):
+def set_seed_lib(seed): # Used to set a random seed across various libraries and frameworks to ensure reproducibility.
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -28,23 +28,23 @@ def set_seed_lib(seed):
 
 @torch.no_grad()
 class RAVE(nn.Module):
-    def __init__(self, device):
+    def __init__(self, device): # Stores the device and sets the default data type for tensors as torch.float
         super().__init__()
 
         self.device = device
         self.dtype = torch.float
 
     @torch.no_grad()
-    def __init_pipe(self, hf_cn_path, hf_path):
+    def __init_pipe(self, hf_cn_path, hf_path): # This private method initializes a Stable Diffusion pipeline with a ControlNet model
         controlnet = ControlNetModel.from_pretrained(hf_cn_path, torch_dtype=self.dtype).to(self.device, self.dtype)
 
         pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(hf_path, controlnet=controlnet, torch_dtype=self.dtype).to(self.device, self.dtype) 
-        pipe.enable_model_cpu_offload()
-        pipe.enable_xformers_memory_efficient_attention()
+        pipe.enable_model_cpu_offload() # Moves unused parts of the model to the CPU to save GPU memory
+        pipe.enable_xformers_memory_efficient_attention() # Optimizes attention computations for performance
         return pipe
         
     @torch.no_grad()
-    def init_models(self, hf_cn_path, hf_path, preprocess_name, model_id=None):
+    def init_models(self, hf_cn_path, hf_path, preprocess_name, model_id=None): # This method sets up the models for the RAVE class by initializing the pipeline and extracting key components
         if model_id is None or model_id == "None":
             pipe = self.__init_pipe(hf_cn_path, hf_path)  
         else:
@@ -66,22 +66,18 @@ class RAVE(nn.Module):
         del pipe
     
     @torch.no_grad()
-    def get_text_embeds(self, prompt, negative_prompt):
-
+    def get_text_embeds(self, prompt, negative_prompt): # Generates embeddings for a given text prompt and negative prompt using the text encoder of the pipeline.
         cond_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length, truncation=True, return_tensors='pt')
-        cond_embeddings = self.text_encoder(cond_input.input_ids.to(self.device))[0]
-
+        cond_embeddings = self.text_encoder(cond_input.input_ids.to(self.device))[0] # Passes the tokenized input through the text encoder to produce embeddings.
+                                                                                     # The [0] index extracts the hidden state representing the embeddings.
 
         uncond_input = self.tokenizer(negative_prompt, padding='max_length', max_length=self.tokenizer.model_max_length, return_tensors='pt')
-
         uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
-
 
         return cond_embeddings, uncond_embeddings
 
     @torch.no_grad()
-    def prepare_control_image(self, control_pil, width, height):
-
+    def prepare_control_image(self, control_pil, width, height): # This method prepares an image to be used as input for the ControlNet conditioning process.
         control_image = self._prepare_control_image(
         image=control_pil,
         width=width,
@@ -96,14 +92,16 @@ class RAVE(nn.Module):
     
     @torch.no_grad()
     def pred_controlnet_sampling(self, current_sampling_percent, latent_model_input, t, text_embeddings, control_image):
+        # This method predicts noise for a given step of the diffusion process using the ControlNet and UNet models. 
+        # It integrates control images into the prediction.
         if (current_sampling_percent < self.controlnet_guidance_start or current_sampling_percent > self.controlnet_guidance_end):
             down_block_res_samples = None
             mid_block_res_sample = None
         else:
             
-            down_block_res_samples, mid_block_res_sample = self.controlnet(
-                latent_model_input,
-                t,
+            down_block_res_samples, mid_block_res_sample = self.controlnet(  # The down_block_res_samples and mid_block_res_sample provide additional 
+                t,                                                           # conditioning information to the UNet, allowing it to incorporate the guidance from the 
+                latent_model_input,                                          # control image at multiple levels.
                 conditioning_scale=self.controlnet_conditioning_scale,
                 encoder_hidden_states=text_embeddings,
                 controlnet_cond=control_image,
@@ -117,19 +115,21 @@ class RAVE(nn.Module):
     
     @torch.no_grad()
     def denoising_step(self, latents, control_image, text_embeddings, t, guidance_scale, current_sampling_percent):
-        
+        # Performs a single step of denoising in the diffusion process.
         latent_model_input = torch.cat([latents] * 2)
         control_image = torch.cat([control_image] * 2)
         latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-
+        # This line adjusts the latent representation (latent_model_input) for the current timestep (t) based on the scheduler's requirements
+        
         noise_pred = self.pred_controlnet_sampling(current_sampling_percent, latent_model_input, t, text_embeddings, control_image)
 
         noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
         
         latents = self.scheduler.step(noise_pred, t, latents)['prev_sample']
+        # Updates the latents (latents) for the next timestep in the reverse diffusion process, removing a layer of noise 
+        # based on the model's predictions
+        
         return latents
 
 
